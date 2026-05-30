@@ -6,6 +6,8 @@ import os
 import requests
 import base64
 import json
+import urllib.parse
+import xml.etree.ElementTree as ET
 
 # Functions for playlists and collections
 @mcp.tool()
@@ -789,6 +791,157 @@ async def playlist_get_contents(playlist_title: str = None, playlist_id: int = N
     
     except Exception as e:
         return json.dumps({"status": "error", "message": f"Error getting playlist contents: {str(e)}"}, indent=4)
+
+@mcp.tool()
+async def playlist_create_smart(
+    title: str,
+    library_name: str = "Music",
+    summary: str = None,
+    unplayed_only: bool = False,
+    played_only: bool = False,
+    year: int = None,
+    studio: str = None,
+    genre: str = None,
+    mood: str = None,
+    min_rating: int = None,
+    added_within: str = None,
+    played_within: str = None,
+    not_played_in: str = None,
+    sort_by: str = None,
+    limit: int = None,
+    deduplicate: bool = False,
+) -> str:
+    """Create a smart (dynamic, auto-updating) playlist using filter rules.
+
+    Args:
+        title: Title for the new smart playlist
+        library_name: Library to filter from (default: "Music")
+        summary: Optional description for the playlist
+        unplayed_only: Only include tracks that have never been played
+        played_only: Only include tracks that have been played at least once
+        year: Filter to tracks from albums released in this year
+        studio: Filter by studio/label (e.g. "Warp", "mau5trap", "Ninja Tune")
+        genre: Filter by genre name (e.g. "Electronic", "Jazz")
+        mood: Filter by mood name (e.g. "Hypnotic", "Atmospheric")
+        min_rating: Minimum user rating on Plex 1-10 scale (e.g. 8 = 4 stars)
+        added_within: Only tracks added within this period (e.g. "1w", "2w", "1mon", "30d")
+        played_within: Only tracks played within this period (e.g. "2w", "1mon")
+        not_played_in: Only tracks NOT played in this period (e.g. "1mon", "6mon")
+        sort_by: Sort order — one of: "random", "addedAt:desc", "lastViewedAt:desc",
+                 "userRating:desc", "ratingCount:desc", "viewCount:desc",
+                 "artist.titleSort,album.titleSort,album.year,track.absoluteIndex,track.index,track.titleSort,track.id"
+        limit: Maximum number of tracks to include
+        deduplicate: Remove duplicate tracks that appear on multiple albums
+    """
+    try:
+        plex = connect_to_plex()
+
+        try:
+            section = plex.library.section(library_name)
+        except NotFound:
+            return json.dumps({"error": f"Library '{library_name}' not found"}, indent=4)
+
+        section_id = section.key
+        plex_url = os.environ.get("PLEX_URL", "").rstrip("/")
+        plex_token = os.environ.get("PLEX_TOKEN", "")
+
+        def lookup_tag(tag_type, name):
+            """Resolve a tag name to its Plex numeric ID."""
+            resp = requests.get(
+                f"{plex_url}/library/sections/{section_id}/{tag_type}",
+                params={"type": "10", "X-Plex-Token": plex_token},
+            )
+            root = ET.fromstring(resp.text)
+            for d in root.findall("Directory"):
+                if d.get("title", "").lower() == name.lower():
+                    return d.get("key")
+            return None
+
+        active_filters = []
+
+        if unplayed_only:
+            active_filters.append("track.viewCount=0")
+        if played_only:
+            active_filters.append("track.viewCount>>=1")
+        if year:
+            active_filters.append(f"album.year={year}")
+        if studio:
+            active_filters.append(f"album.studio={urllib.parse.quote(studio)}")
+        if min_rating is not None:
+            active_filters.append(f"userRating>>={min_rating}")
+        if added_within:
+            active_filters.append(f"album.addedAt>>=-{added_within}")
+        if played_within:
+            active_filters.append(f"lastViewedAt>>=-{played_within}")
+        if not_played_in:
+            active_filters.append(f"lastViewedAt<<=-{not_played_in}")
+        if genre:
+            genre_id = lookup_tag("genre", genre)
+            if genre_id is None:
+                return json.dumps({"error": f"Genre '{genre}' not found in library"}, indent=4)
+            active_filters.append(f"genre={genre_id}")
+        if mood:
+            mood_id = lookup_tag("mood", mood)
+            if mood_id is None:
+                return json.dumps({"error": f"Mood '{mood}' not found in library"}, indent=4)
+            active_filters.append(f"mood={mood_id}")
+
+        parts = ["type=10"]
+        if active_filters:
+            parts.append("&and=1&".join(active_filters))
+        if deduplicate:
+            parts.append("group=guid&having=min(album.originallyAvailableAt)")
+        if sort_by:
+            parts.append(f"sort={urllib.parse.quote(sort_by)}")
+        if limit:
+            parts.append(f"limit={limit}")
+
+        filter_query = f"/library/sections/{section_id}/all?" + "&".join(parts)
+        content_uri = "library://x/directory/" + urllib.parse.quote(filter_query, safe="")
+
+        response = requests.post(
+            f"{plex_url}/playlists",
+            params={
+                "type": "audio",
+                "title": title,
+                "smart": "1",
+                "uri": content_uri,
+                "X-Plex-Token": plex_token,
+            },
+        )
+
+        if response.status_code not in (200, 201):
+            return json.dumps({
+                "error": f"Failed to create playlist: HTTP {response.status_code}",
+                "detail": response.text[:500],
+            }, indent=4)
+
+        root = ET.fromstring(response.text)
+        playlist_elem = root.find("Playlist")
+
+        if playlist_elem is None:
+            return json.dumps({"error": "Playlist created but response could not be parsed"}, indent=4)
+
+        playlist_id = int(playlist_elem.get("ratingKey"))
+
+        if summary:
+            plex.fetchItem(playlist_id).edit(summary=summary)
+
+        return json.dumps({
+            "status": "success",
+            "message": f"Smart playlist '{title}' created successfully",
+            "data": {
+                "title": playlist_elem.get("title"),
+                "id": playlist_id,
+                "smart": True,
+                "item_count": playlist_elem.get("leafCount"),
+                "filter": filter_query,
+            },
+        }, indent=4)
+
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=4)
+
 
 def get_playlist_contents(playlist):
     """Helper function to get formatted playlist contents."""
