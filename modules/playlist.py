@@ -820,9 +820,9 @@ async def playlist_create_smart(
         unplayed_only: Only include tracks that have never been played
         played_only: Only include tracks that have been played at least once
         year: Filter to tracks from albums released in this year
-        studio: Filter by studio/label (e.g. "Warp", "mau5trap", "Ninja Tune")
+        studio: Filter by studio/label (e.g. "Merge Records", "Sub Pop", "4AD")
         genre: Filter by genre name (e.g. "Electronic", "Jazz")
-        mood: Filter by mood name (e.g. "Hypnotic", "Atmospheric")
+        mood: Filter by mood name (e.g. "Energetic", "Melancholy")
         min_rating: Minimum user rating on Plex 1-10 scale (e.g. 8 = 4 stars)
         added_within: Only tracks added within this period (e.g. "1w", "2w", "1mon", "30d")
         played_within: Only tracks played within this period (e.g. "2w", "1mon")
